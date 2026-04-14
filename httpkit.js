@@ -141,7 +141,7 @@ export const httpKit = {
         if (!parent) {
           throw new Error('Cannot replace outer: target has no parent');
         }
-        const next = target.nextSibling;
+        const next = target.nextElementSibling;
         target.remove();
         (next || parent).insertAdjacentHTML(next ? 'beforebegin' : 'beforeend', html);
         return;
