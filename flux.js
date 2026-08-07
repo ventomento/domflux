@@ -56,6 +56,8 @@ export const flux = {
       el.__componentInstance.destroy();
       delete el.__componentInstance;
     }
+
+    delete el.dataset.hydrated;
   },
 
   scan(root = document) {
