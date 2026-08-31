@@ -55,13 +55,14 @@ export const httpKit = {
       method: 'GET',
       credentials: 'same-origin',
       redirect: 'follow',
+      ...options,
       headers: {
         'X-Requested-With': 'XMLHttpRequest',
         ...dynamicHeaders,
         ...options.headers,
       },
-      ...options,
     };
+
 
     const response = await fetch(url, merged);
 
