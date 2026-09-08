@@ -130,12 +130,19 @@ export const flux = {
 
           // Handle removed nodes
           mutation.removedNodes.forEach((node) => {
-            if (node.nodeType === 1) {
-              this.deactivate(node);
-              // Also clean up all descendants
-              node.querySelectorAll?.("*").forEach((child) => this.deactivate(child));
-            }
+            if (node.nodeType !== 1) return;
+
+            // It may have simply been moved somewhere else in the document.
+            if (node.isConnected) return;
+
+            this.deactivate(node);
+
+            node.querySelectorAll("*").forEach((child) => {
+              this.deactivate(child);
+            });
+
           });
+
         });
       });
 
