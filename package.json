@@ -1,5 +1,43 @@
 {
   "name": "domflux",
   "version": "1.0.0",
-  "main": "index.js"
+  "description": "Ultra lightweight frontend framework to control component flux in the DOM model.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./flux": "./flux.js",
+    "./httpkit": "./httpkit.js"
+  },
+  "main": "./index.js",
+  "files": [
+    "index.js",
+    "flux.js",
+    "httpkit.js"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "test": "npm run test:unit && npm run test:browser",
+    "test:unit": "node --test test/unit/",
+    "test:browser": "playwright test --grep-invert @perf",
+    "test:perf": "playwright test --grep @perf --workers 1"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ventomento/domflux.git"
+  },
+  "keywords": [
+    "dom",
+    "components",
+    "custom-elements",
+    "web-components",
+    "hydration",
+    "lazy-loading",
+    "intersectionobserver",
+    "fetch"
+  ],
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "happy-dom": "^21.0.1"
+  }
 }

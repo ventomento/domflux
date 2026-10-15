@@ -1,190 +1,181 @@
 /**
- * Flux – Lightweight DOM mutation & visibility-driven component hydration
+ * Flux – Lightweight component lifecycle on top of native Custom Elements
  *
- * Automatically detects elements matching registered selectors, instantiates
- * associated Component classes, calls hydrate() when elements are added to
- * the DOM, and cleans up via destroy() when removed.
+ * The browser detects components, so there is no MutationObserver, registry
+ * or DOM scanning: connectedCallback → hydrate(), disconnectedCallback → destroy().
  *
  * Features:
- * - MutationObserver-based DOM watching
- * - One-time & recurring visibility observation (IntersectionObserver)
- * - Automatic cleanup on element removal
+ * - Native lifecycle (works with clones, late registration and shadow DOM)
+ * - Per-connection AbortSignal for automatic cleanup of listeners, fetches & timers
+ * - Opt-in viewport hooks: onEnter() once, onLeave() every time
+ * - One sitewide IntersectionObserver for all components
+ * - Survives Element.moveBefore() without re-hydrating
  * - Progressive enhancement friendly
  *
  * @version 1.0.0
- * @author vento-mento
+ * @author ventomento
  */
 
+// Lets the module be imported where there is no DOM (SSR, Node tooling).
+const Base = globalThis.HTMLElement ?? class {};
 
-export class Component {
-  constructor(el) {
-    this.el = el;
+const abortedSignal = AbortSignal.abort();
+const visibilityChanged = Symbol("visibilityChanged");
+let viewportOptions = { rootMargin: "0px 0px 150px 0px", threshold: 0 };
+let io = null;
+
+/**
+ * Configure the sitewide viewport box that onEnter() and onLeave() are
+ * measured against. All observed components share it, so it can only be set
+ * before the first component is observed (i.e. before register()).
+ *
+ * - rootMargin grows/shrinks the viewport, e.g. a bottom margin makes
+ *   onEnter() fire early (preloading) and onLeave() fire late at the bottom.
+ * - threshold is the visible ratio that counts as "in view". Elements taller
+ *   than the viewport may never reach a high threshold; keep it low.
+ *
+ * @param {{ rootMargin?: string, threshold?: number }} options
+ */
+export function configureViewport(options) {
+  if (io) throw new Error("configureViewport() must be called before any component is observed");
+  viewportOptions = { ...viewportOptions, ...options };
+}
+
+function viewport() {
+  return (io ??= new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      try {
+        entry.target[visibilityChanged](entry);
+      } catch (error) {
+        reportError(error);
+      }
+    }
+  }, viewportOptions));
+}
+
+/**
+ * Base class for components. Optional viewport hooks, defined by subclasses:
+ *
+ * - onEnter(entry): once per connection, the first time the element is in view
+ *   (from any direction). Always runs after hydrate().
+ * - onLeave(entry): every time the element leaves view, from any direction,
+ *   if it was in view before.
+ *
+ * Defining either hook opts the element itself into observation; it then
+ * needs a box (e.g. `display: block`, never `display: contents`).
+ */
+export class Component extends Base {
+  #connected = false;
+  #controller = null;
+  #entered = false;
+  #visible = false;
+
+  /**
+   * Aborted when the element leaves the document; a fresh one is used for
+   * every connection. Pass it to addEventListener and fetch so they clean
+   * themselves up. Async hydrate() code should check `signal.aborted` after
+   * each await. While disconnected it is always aborted.
+   *
+   * Created on first access, so components that never use it pay nothing.
+   * @returns {AbortSignal}
+   */
+  get signal() {
+    if (!this.#connected) return abortedSignal;
+    return (this.#controller ??= new AbortController()).signal;
   }
+
+  connectedCallback() {
+    this.#connected = true;
+    this.#controller = null;
+    this.#entered = this.#visible = false;
+    this.hydrate();
+    if (this.onEnter || this.onLeave) viewport().observe(this);
+  }
+
+  disconnectedCallback() {
+    this.#connected = false;
+    if (this.onEnter || this.onLeave) io?.unobserve(this);
+    this.#controller?.abort();
+    this.#controller = null;
+    this.destroy();
+  }
+
+  // Its presence makes Element.moveBefore() keep the component alive instead of
+  // running disconnectedCallback + connectedCallback.
+  connectedMoveCallback() {}
 
   hydrate() {}
   destroy() {}
+
+  [visibilityChanged](entry) {
+    const visible = entry.isIntersecting && entry.intersectionRatio >= viewportOptions.threshold;
+    if (visible === this.#visible) return;
+    this.#visible = visible;
+
+    if (visible && !this.#entered) {
+      this.#entered = true;
+      this.onEnter?.(entry);
+      // Nothing left to report for enter-only components.
+      if (!this.onLeave) io.unobserve(this);
+    } else if (!visible) {
+      this.onLeave?.(entry);
+    }
+  }
 }
 
-export const flux = {
-  registry: new Map(),
-  mutationObserver: null,
-  intersectionObserver: null,
-  unIntersectionObserver: null,
-
-  register(selector, Klass) {
-    this.registry.set(selector, Klass);
-  },
-
-  activate(el) {
-    if (el.dataset.hydrated !== undefined) return;
-    try {
-      for (let [selector, Klass] of this.registry.entries()) {
-        if (el.matches(selector)) {
-          const instance = new Klass(el);
-          instance.hydrate();
-          el.__componentInstance = instance;
-          el.dataset.hydrated = "";
-        }
-      }
-    } catch (error) {
-      console.error(error);
-    }
-  },
-
-  deactivate(el) {
-    if (el.__componentInstance) {
-      el.__componentInstance.destroy();
-      delete el.__componentInstance;
-    }
-
-    delete el.dataset.hydrated;
-  },
-
-  scan(root = document) {
-    for (let [selector] of this.registry.entries()) {
-      root.querySelectorAll(selector).forEach((el) => this.activate(el));
-    }
-  },
-
-  observeVisibility(el, callback) {
-    if (!this.intersectionObserver) {
-      this.intersectionObserver = new IntersectionObserver((entries) => {
-        entries.forEach((entry) => {
-          if (entry.isIntersecting) {
-            const cb = entry.target.__onVisible;
-            if (cb) {
-              cb(entry.target);
-              delete entry.target.__onVisible;
-              this.intersectionObserver.unobserve(entry.target);
-            }
-          }
-        });
-      }, {
-        root: null,
-        threshold: 0.0,
-        rootMargin: "0px 0px 150px 0px" // pre-loads a bit earlier
-      });
-    }
-
-    el.__onVisible = callback;
-    this.intersectionObserver.observe(el);
-  },
-
-  observeUnVisibility(element, callback) {
-    // Fires **every time** element goes out of view (multiple times possible)
-    if (!element) return;
-
-    if (!this.unIntersectionObserver) {
-      this.unIntersectionObserver = new IntersectionObserver(
-        (entries) => {
-          entries.forEach(entry => {
-            if (!entry.isIntersecting) {
-              const cb = entry.target.__onUnVisible;
-              if (typeof cb === 'function') {
-                cb(entry);
-              }
-            }
-          });
-        },
-        {
-          threshold: 0.3
-        }
-      );
-    }
-
-    element.__onUnVisible = callback;
-    this.unIntersectionObserver.observe(element);
-  },
-
-  start() {
-    if (!this.mutationObserver) {
-      this.mutationObserver = new MutationObserver((mutations) => {
-        mutations.forEach((mutation) => {
-          // Handle added nodes
-          mutation.addedNodes.forEach((node) => {
-            if (node.nodeType === 1) {
-              this.activate(node);
-              this.scan(node);
-            }
-          });
-
-          // Handle removed nodes
-          mutation.removedNodes.forEach((node) => {
-            if (node.nodeType !== 1) return;
-
-            // It may have simply been moved somewhere else in the document.
-            if (node.isConnected) return;
-
-            this.deactivate(node);
-
-            node.querySelectorAll("*").forEach((child) => {
-              this.deactivate(child);
-            });
-
-          });
-
-        });
-      });
-
-      this.mutationObserver.observe(document.body, {
-        childList: true,
-        subtree: true
-      });
-    }
-
-    // Initial hydration pass
-    this.scan(document);
-  }
-};
+/**
+ * Define a component for a custom element tag (must contain a hyphen).
+ * Existing elements with that tag are upgraded and hydrated immediately.
+ * Registering the same class twice is a no-op.
+ *
+ * @param {string} tag
+ * @param {typeof Component} Klass
+ */
+export function register(tag, Klass) {
+  if (customElements.get(tag) === Klass) return;
+  customElements.define(tag, Klass);
+}
 
 /**
 * Example usage
 * html:
 
-<div class="carousel">...<div>
+<lazy-chart data-src="/chart.json"></lazy-chart>
+<flux-video><video src="clip.mp4" controls playsinline></video></flux-video>
+
+* css (observed components need a box):
+
+lazy-chart, flux-video { display: block; }
 
 * js:
-* 1. Define a component
+* 1. Optionally configure the sitewide viewport (before register)
 
-class Carousel extends Component {
-  hydrate() {
-    console.log("Carousel → hydrated", this.el);
-    // Initialize slider, attach listeners, lazy-load images, etc.
-    
-    Flux.observeVisibility(this.el, (el) => {
-      console.log("Carousel now visible → load high-res images / start autoplay");
-    });
-  }
+configureViewport({ rootMargin: "0px 0px 300px 0px" });
 
-  destroy() {
-    // Remove listeners, clear timers, etc.
-    console.log("Carousel → destroyed");
+* 2. Define components
+
+class LazyChart extends Component {
+  // Once, ~300px before it scrolls into view; then no longer observed.
+  async onEnter() {
+    const res = await fetch(this.dataset.src, { signal: this.signal });
+    // render...
   }
 }
 
-// 2. Register selector → component class mapping
-Flux.register('.carousel', Carousel);
+class FluxVideo extends Component {
+  hydrate() {
+    // Removed automatically when the element leaves the document.
+    this.querySelector("video").addEventListener("ended", () => console.log("done"), { signal: this.signal });
+  }
 
-// 3. Start watching the DOM
-Flux.start();
+  // Every time it scrolls out of view.
+  onLeave() {
+    this.querySelector("video").pause();
+  }
+}
+
+* 3. Register tag → component class (upgrades elements already on the page)
+
+register("lazy-chart", LazyChart);
+register("flux-video", FluxVideo);
  */

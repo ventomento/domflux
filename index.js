@@ -1,8 +1,2 @@
-import { flux, Component } from "./flux";
-import { httpKit } from "./httpkit";
-
-export const domflux = {
-  flux,
-  Component,
-  httpKit
-};
+export { Component, register, configureViewport } from "./flux.js";
+export { httpKit } from "./httpkit.js";
