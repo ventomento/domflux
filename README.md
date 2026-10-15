@@ -7,7 +7,7 @@ domflux gives server-rendered pages a component lifecycle with almost no code of
 - **Lifecycle:** `hydrate()` when an element enters the document, `destroy()` when it leaves. This works for parsed HTML, `innerHTML`, clones, late registration and shadow DOM.
 - **Automatic cleanup:** `this.signal` removes listeners and cancels requests when the component is removed.
 - **Viewport hooks:** `onEnter()` once when a component first scrolls into view, `onLeave()` every time it scrolls out. One shared observer serves the whole site.
-- **httpKit:** a small `fetch` wrapper that sends auth headers to your own origin only, plus a helper that loads HTML fragments into the page. Components in loaded HTML hydrate automatically.
+- **httpKit:** a small `fetch` wrapper that adds your dynamic headers to every request, plus a helper that loads HTML (or JSON rendered to HTML) into the page. Components in loaded content hydrate automatically.
 - **No dependencies, ESM only.** About 3.2 KB minified, 1.5 KB minified and gzipped.
 
 ## Install
@@ -159,56 +159,65 @@ register("lazy-chart", LazyChart);
 ```js
 import { httpKit } from "domflux";
 
-// Optional: headers added to every request to your own origin.
-httpKit.setHeaderProvider(async () => ({
-  "X-CSRF-Token": document.querySelector("meta[name=csrf-token]").content,
+// Optional: called before every request; returns a plain object of headers.
+httpKit.setHeaders(async () => ({
+  "x-fingerprint": await fingerprint(),
 }));
 
 const res = await httpKit.get("/api/items");
-const items = await res.json();
+if (res.ok) items = await res.json();
 
 await httpKit.post("/api/items", JSON.stringify(item), {
-  headers: { "Content-Type": "application/json" },
+  headers: { "content-type": "application/json" },
 });
 ```
 
-- **Shorthands:** `get(url, options)`, `post(url, body, options)`, `put(url, body, options)`, `delete(url, body, options)`, plus `request(url, options)`. The options are normal [`fetch` options](https://developer.mozilla.org/en-US/docs/Web/API/RequestInit).
-- **Errors:** a response that isn't 2xx throws an `Error` with `status`, `statusText` and `response` attached.
-- **Header precedence:** per-call `headers` override the provider's headers, which override the default `X-Requested-With: XMLHttpRequest`.
+- **Same signature and contract as `fetch`:** `request(url, options)`, `get(url, options)`, `delete(url, options)`, `post(url, body, options)`, `put(url, body, options)` and `patch(url, body, options)`. Any HTTP status resolves with the `Response`; only network errors and aborts reject.
+- **Dynamic headers:** the `setHeaders` function receives `(url, options)` and runs fresh for every request, so each request sends a snapshot. Per-call `headers` override it.
+- **Plain objects only:** headers are merged with object spread, so pass `options.headers` as an object (not `Headers` or an array) and keep names in one casing, e.g. lowercase.
+- **Redirects reject by default** (`redirect: "error"`), so your headers never follow a redirect to another site. Pass `redirect: "follow"` on calls that need redirects.
+- **Every origin gets the headers.** If some must stay on your own origin, check `url` in the function. Custom headers on cross-origin requests trigger a CORS preflight, so the other server must allow them.
 
-### Same-origin protection
-
-The header provider and `X-Requested-With` are only sent to the page's own origin. Requests to other origins get only the headers you pass in that call.
-
-Same-origin requests also use `mode: "same-origin"`. If your server redirects one to another site, the request fails instead of carrying your tokens there. Passing a `mode` explicitly overrides this.
-
-### Loading HTML into the page
+### Loading content into the page
 
 ```js
-await httpKit.resourceIntoTarget("/partials/cart", document.querySelector("#cart"), {
-  replace: "inner",
+await httpKit.load(document.querySelector("#cart"), "/partials/cart");
+
+await httpKit.load(list, "/api/rows?page=2", {
+  at: "append",
+  render: (rows) => rows.map(rowHTML).join(""),
 });
 ```
+
+`load(target, url, options)` GETs `url` and inserts the result relative to `target`.
 
 | Option | Default | |
 |---|---|---|
-| `replace` | `false` | `false` inserts at `position`; `"inner"` replaces the target's contents; `"outer"` replaces the target itself |
-| `position` | `"beforeend"` | `beforebegin`, `afterbegin`, `beforeend` or `afterend`; ignored when `replace` is set |
-| `throwOnError` | `false` | By default failures are logged with `console.warn` |
-| `allowCrossOrigin` | `false` | Allow loading HTML from another origin |
+| `at` | `"inner"` | `inner` replaces the target's contents, `outer` replaces the target, `before`/`after` insert next to it, `prepend`/`append` inside it |
+| `render` | | `(body, response) => html`. `body` is the text for `text/html`, the parsed value for `application/json`. Required for JSON |
 | `signal` | | An `AbortSignal` to cancel the load |
 
-- **Components in the loaded HTML hydrate automatically.**
-- **Only one load per target:** starting a new load into the same target cancels the previous one. Cancelled loads finish silently.
-- **Security:** the HTML is inserted as-is. `<script>` tags don't run, but inline event handlers such as `onerror="..."` do. Only load HTML from endpoints that return trusted markup.
-  - URLs on other origins are refused unless you pass `allowCrossOrigin: true`.
-  - Responses must have a `text/html` content type.
+- **Components in the loaded content hydrate automatically.**
+- **Resolves with the `Response`,** or `undefined` if `signal` cancelled it. Non-2xx responses, other content types and a `render` that doesn't return a string reject, with nothing inserted.
+- **Concurrent loads are yours to coordinate.** Nothing cancels an earlier load into the same target, so a slow response can overwrite a newer one. Abort the previous load:
+
+  ```js
+  let controller;
+  input.addEventListener("input", () => {
+    controller?.abort();
+    controller = new AbortController();
+    httpKit.load(results, `/search?q=${encodeURIComponent(input.value)}`, { signal: controller.signal });
+  });
+  ```
+
+  Inside a component, pass `this.signal` to tie the load to the component's lifetime.
+- **Security:** content is inserted as-is, from any origin. `<script>` tags don't run, but inline event handlers such as `onerror="..."` do. Only load from endpoints that return trusted markup, and escape data in `render`.
 
 ## Browser support
 
 domflux is tested against **Chromium and Firefox only**. Safari is not tested.
 
-The oldest supported versions are Chrome 116 and Firefox 124. They're set by `AbortSignal.any`, which is used when you pass a `signal` to `resourceIntoTarget`. Moving components with `moveBefore()` is used where the browser supports it.
+The oldest supported versions are Chrome 116 and Firefox 124. Moving components with `moveBefore()` is used where the browser supports it.
 
 The package can be imported in Node, for example during server rendering or in tests, without a DOM. Components only work in a browser.
 

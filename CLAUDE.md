@@ -31,7 +31,6 @@ The package is only tested against Chromium and Firefox. WebKit/Safari is delibe
 - **Browser tests** (`test/browser/`) cover what happy-dom can't: real layout and scrolling, `moveBefore`, the top layer, real `fetch` rules, and timing.
   - `fixture.js` starts two real loopback servers per worker. The page origin serves the library and per-test pages; the "other" origin records every request it receives.
   - Pages must be served by the real server, not `page.route`: Chromium treats intercepted documents as public and then blocks requests to loopback. CORS preflights and redirects also bypass `page.route`. Cross-origin assertions therefore need the recording server.
-  - The security tests include a control that proves a leak is detectable. Keep it, or the redirect test can pass for the wrong reason.
 - **Perf tests** (`perf.spec.js`, tagged `@perf`) compare against bare custom elements and assert loose budgets, so they catch complexity regressions rather than noise.
 
 ## Architecture
@@ -60,16 +59,15 @@ There is deliberately no `MutationObserver`, selector registry, or DOM scanning.
 
 ### httpkit.js: fetch wrapper and HTML insertion
 
-- **Same-origin only extras.** The dynamic headers from `setHeaderProvider`, the default `X-Requested-With` header and `mode: 'same-origin'` apply only to same-origin URLs.
-  - Same-origin mode makes a redirect to another origin fail instead of forwarding tokens.
-  - Cross-origin requests receive only the headers passed in that call.
-- Headers are built with `Headers` objects, so any `HeadersInit` form works. Precedence, from lowest to highest, is: defaults, then dynamic headers, then per-call `options.headers`.
-- `resourceIntoTarget` inserts fetched HTML as-is: inline handlers run, `<script>` tags don't. Its guards:
-  - It refuses cross-origin URLs unless `allowCrossOrigin` is set.
-  - It requires a `text/html` response.
-  - It aborts the previous in-flight load into the same target, tracked in a `WeakMap`.
-  - `AbortError` resolves silently.
-  - `replace: 'inner'` / `'outer'` use `innerHTML` / `outerHTML` and ignore `position`.
+- `request(url, options)` has fetch's signature and contract: any HTTP status resolves, only network errors and aborts reject. The verb shorthands (`get`, `delete`, `post`, `put`, `patch`; `post`/`put`/`patch` take `body` second) are one-liners over it, and nothing uses `this`.
+- `setHeaders(fn)` sets the function called before every request with `(url, options)`; its plain-object result is a fresh snapshot per request (e.g. a live fingerprint). There is no origin logic: the headers go to every origin.
+- `request` defaults to `redirect: 'error'` so the headers can't follow a redirect to another site; per-call `redirect` overrides it. The browser test for this has a control that proves a leak is detectable. Keep it, or the redirect test can pass for the wrong reason.
+- Headers are plain objects merged with spread: dynamic, then per-call `options.headers`. `Headers` instances and arrays aren't supported.
+- `load(target, url, { at, render, signal })` is always a GET. It inserts as-is, from any origin: inline handlers run, `<script>` tags don't.
+  - The parser is picked by exact MIME: `text/html` → text, `application/json` → parsed. `render(body, response)` must return a string, so JSON needs it.
+  - Non-2xx, other content types and a non-string render result reject without inserting.
+  - `at` is `inner | outer | before | prepend | append | after`, mapped to `innerHTML`, `outerHTML` and `insertAdjacentHTML`.
+  - Concurrent loads are deliberately not coordinated; callers abort the previous one via `signal`. An abort resolves `undefined`.
 
 ### How the two modules interact
 
