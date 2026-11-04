@@ -178,23 +178,33 @@ test("HTML from another origin can be loaded", async ({ page, other }) => {
 
 test("aborting a load cancels the request and the next load wins", async ({ page, origin }) => {
   let slowAborted = false;
+  page.on("requestfailed", (request) => {
+    if (request.url().endsWith("/slow")) slowAborted = true;
+  });
   await page.route(`${origin}/slow`, async (route) => {
     await new Promise((r) => setTimeout(r, 300));
-    await route.fulfill(html("<i>slow</i>")).catch(() => (slowAborted = true));
+    await route.fulfill(html("<i>slow</i>")).catch(() => {});
   });
   await page.route(`${origin}/fast`, (route) => route.fulfill(html("<i>fast</i>")));
   await open(page, { body: `<div id="box"></div>`, module: SETUP });
 
+  // Abort only once the request is on its way: the header provider is awaited
+  // first, so an immediate abort would stop it before it was ever sent.
+  const slowSent = page.waitForRequest(`${origin}/slow`);
+  await page.evaluate(() => {
+    window.controller = new AbortController();
+    window.slow = window.domflux.httpKit.load(document.getElementById("box"), "/slow", { signal: window.controller.signal });
+  });
+  await slowSent;
+
   const result = await page.evaluate(async () => {
     const { httpKit } = window.domflux;
     const box = document.getElementById("box");
-    const controller = new AbortController();
-    const slow = httpKit.load(box, "/slow", { signal: controller.signal });
-    controller.abort();
+    window.controller.abort();
     const fast = httpKit.load(box, "/fast");
-    const [slowResult] = await Promise.all([slow, fast]);
+    const [slowResult] = await Promise.all([window.slow, fast]);
     await new Promise((r) => setTimeout(r, 400));
-    return { html: box.innerHTML, slowResult: slowResult ?? null };
+    return { html: box.innerHTML, slowResult };
   });
   expect(result).toEqual({ html: "<i>fast</i>", slowResult: null });
   expect(slowAborted).toBe(true);
