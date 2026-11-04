@@ -7,8 +7,8 @@ domflux gives server-rendered pages a component lifecycle with almost no code of
 - **Lifecycle:** `hydrate()` when an element enters the document, `destroy()` when it leaves. This works for parsed HTML, `innerHTML`, clones, late registration and shadow DOM.
 - **Automatic cleanup:** `this.signal` removes listeners and cancels requests when the component is removed.
 - **Viewport hooks:** `onEnter()` once when a component first scrolls into view, `onLeave()` every time it scrolls out. One shared observer serves the whole site.
-- **httpKit:** a small `fetch` wrapper that adds your dynamic headers to every request, plus a helper that loads HTML (or JSON rendered to HTML) into the page. Components in loaded content hydrate automatically.
-- **No dependencies, ESM only.** About 3.2 KB minified, 1.5 KB minified and gzipped.
+- **httpKit:** a small `fetch` wrapper that adds your dynamic headers to every request and reports every failure in one place, plus a helper that loads HTML (or JSON rendered to HTML or nodes) into the page. Components in loaded content hydrate automatically.
+- **No dependencies, ESM only.** About 3 KB minified, 1.5 KB minified and gzipped.
 
 ## Install
 
@@ -164,6 +164,11 @@ httpKit.setHeaders(async () => ({
   "x-fingerprint": await fingerprint(),
 }));
 
+// Optional: called on every failed request. The default logs it.
+httpKit.setFailureHandler(({ response, error }) => {
+  showError(error ? "Could not reach the server." : `Failed: ${response.status}`);
+});
+
 const res = await httpKit.get("/api/items");
 if (res.ok) items = await res.json();
 
@@ -172,10 +177,22 @@ await httpKit.post("/api/items", JSON.stringify(item), {
 });
 ```
 
-- **Same signature and contract as `fetch`:** `request(url, options)`, `get(url, options)`, `delete(url, options)`, `post(url, body, options)`, `put(url, body, options)` and `patch(url, body, options)`. Any HTTP status resolves with the `Response`; only network errors and aborts reject.
+- **Same signature as `fetch`:** `request(url, options)`, `get(url, options)`, `delete(url, options)`, `post(url, body, options)`, `put(url, body, options)` and `patch(url, body, options)`.
+- **`res.ok` covers every failure.** Unlike `fetch`, a failed request never rejects, so there is one check and no `try/catch`:
+
+  | Outcome | Resolves to | Failure handler |
+  |---|---|---|
+  | 2xx | The `Response` | Not called |
+  | Non-2xx | The `Response`, body unread | Called with `{ url, options, response }` |
+  | Network error, refused redirect | `Response.error()`: `ok: false`, `status: 0`, `type: "error"` | Called with `{ url, options, error }` |
+  | Abort | `Response.error()` | Not called |
+  | `redirect: "manual"` | An `opaqueredirect` response (`ok: false`, check `res.type`) | Not called |
+
+- **The failure handler only reacts.** It can't change what the caller gets, so a call behaves the same whether a handler is set or not. To read the body in it, use `response.clone()`, or the caller can't read it afterwards.
+- **Bugs still reject:** a header function or failure handler that throws rejects the call. A header function that throws sends nothing. `fetch` itself also fails on an invalid URL or header value, and browsers report that like a network error, so it reaches the failure handler.
 - **Dynamic headers:** the `setHeaders` function receives `(url, options)` and runs fresh for every request, so each request sends a snapshot. Per-call `headers` override it.
 - **Plain objects only:** headers are merged with object spread, so pass `options.headers` as an object (not `Headers` or an array) and keep names in one casing, e.g. lowercase.
-- **Redirects reject by default** (`redirect: "error"`), so your headers never follow a redirect to another site. Pass `redirect: "follow"` on calls that need redirects.
+- **Redirects are refused by default** (`redirect: "error"`), so your headers never follow a redirect to another site. Pass `redirect: "follow"` on calls that need redirects.
 - **Every origin gets the headers.** If some must stay on your own origin, check `url` in the function. Custom headers on cross-origin requests trigger a CORS preflight, so the other server must allow them.
 
 ### Loading content into the page
@@ -187,18 +204,25 @@ await httpKit.load(list, "/api/rows?page=2", {
   at: "append",
   render: (rows) => rows.map(rowHTML).join(""),
 });
+
+await httpKit.load(list, "/api/rows?page=2", {
+  render: (rows) => rows.map(rowElement),
+  at: (list, nodes) => animateIn(list, nodes),
+});
 ```
 
 `load(target, url, options)` GETs `url` and inserts the result relative to `target`.
 
 | Option | Default | |
 |---|---|---|
-| `at` | `"inner"` | `inner` replaces the target's contents, `outer` replaces the target, `before`/`after` insert next to it, `prepend`/`append` inside it |
-| `render` | | `(body, response) => html`. `body` is the text for `text/html`, the parsed value for `application/json`. Required for JSON |
+| `at` | `"inner"` | `inner` replaces the target's contents, `outer` replaces the target, `before`/`after` insert next to it, `prepend`/`append` inside it. A function `(target, node) => {}` places the node itself |
+| `render` | | `(body, response) => content`, where content is an HTML string, a Node (a fragment too) or an array of those. `body` is the text for `text/html`, the parsed value for `application/json`. Required for JSON |
 | `signal` | | An `AbortSignal` to cancel the load |
 
 - **Components in the loaded content hydrate automatically.**
-- **Resolves with the `Response`,** or `undefined` if `signal` cancelled it. Non-2xx responses, other content types and a `render` that doesn't return a string reject, with nothing inserted.
+- **Resolves with the `Response`,** or `null` if nothing was inserted: the request failed (which reached the failure handler) or `signal` cancelled it.
+- **Bugs reject, with nothing inserted:** another content type, an unreadable body, invalid JSON, a throwing `render`, or one that returns nothing insertable. So does inserting next to a target that has no parent.
+- **Strings are parsed as HTML, not in the target's context,** so SVG content needs `render` to return nodes.
 - **Concurrent loads are yours to coordinate.** Nothing cancels an earlier load into the same target, so a slow response can overwrite a newer one. Abort the previous load:
 
   ```js
@@ -211,7 +235,7 @@ await httpKit.load(list, "/api/rows?page=2", {
   ```
 
   Inside a component, pass `this.signal` to tie the load to the component's lifetime.
-- **Security:** content is inserted as-is, from any origin. `<script>` tags don't run, but inline event handlers such as `onerror="..."` do. Only load from endpoints that return trusted markup, and escape data in `render`.
+- **Security:** content is inserted as-is, from any origin. `<script>` tags in strings don't run, but inline event handlers such as `onerror="..."` do. Only load from endpoints that return trusted markup, and escape data in `render`.
 
 ## Browser support
 

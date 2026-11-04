@@ -59,15 +59,18 @@ There is deliberately no `MutationObserver`, selector registry, or DOM scanning.
 
 ### httpkit.js: fetch wrapper and HTML insertion
 
-- `request(url, options)` has fetch's signature and contract: any HTTP status resolves, only network errors and aborts reject. The verb shorthands (`get`, `delete`, `post`, `put`, `patch`; `post`/`put`/`patch` take `body` second) are one-liners over it, and nothing uses `this`.
+- `request(url, options)` has fetch's signature but never rejects for a failed request, so `res.ok` is the one check: any HTTP status resolves with its `Response`, and a network error or abort resolves to `Response.error()`. Only a throwing header provider or failure handler rejects, because those are bugs. The verb shorthands (`get`, `delete`, `post`, `put`, `patch`; `post`/`put`/`patch` take `body` second) are one-liners over it, and nothing uses `this`.
 - `setHeaders(fn)` sets the function called before every request with `(url, options)`; its plain-object result is a fresh snapshot per request (e.g. a live fingerprint). There is no origin logic: the headers go to every origin.
+- `setFailureHandler(fn)` sets the one function called on a failure: a non-2xx response (`{ url, options, response }`) or a network error (`{ url, options, error }`). The default logs. It only reacts and never changes what `request` returns, so a call's contract doesn't depend on global setup, which is the reason there is no status-range handler or `null` return. Aborts and `redirect: 'manual'` responses are not failures.
+- The header provider runs outside `request`'s `try`, so a bug in it can't be reported as a network error. `fetch`'s own `TypeError` for an invalid URL or header can't be told apart from a network error, so that does reach the handler.
 - `request` defaults to `redirect: 'error'` so the headers can't follow a redirect to another site; per-call `redirect` overrides it. The browser test for this has a control that proves a leak is detectable. Keep it, or the redirect test can pass for the wrong reason.
 - Headers are plain objects merged with spread: dynamic, then per-call `options.headers`. `Headers` instances and arrays aren't supported.
-- `load(target, url, { at, render, signal })` is always a GET. It inserts as-is, from any origin: inline handlers run, `<script>` tags don't.
-  - The parser is picked by exact MIME: `text/html` → text, `application/json` → parsed. `render(body, response)` must return a string, so JSON needs it.
-  - Non-2xx, other content types and a non-string render result reject without inserting.
-  - `at` is `inner | outer | before | prepend | append | after`, mapped to `innerHTML`, `outerHTML` and `insertAdjacentHTML`.
-  - Concurrent loads are deliberately not coordinated; callers abort the previous one via `signal`. An abort resolves `undefined`.
+- `load(target, url, { at, render, signal })` is always a GET, on top of `request`. It inserts as-is, from any origin: inline handlers run, `<script>` tags in strings don't.
+  - The parser is picked by exact MIME: `text/html` → text, `application/json` → parsed. `render(body, response)` returns an HTML string, a Node or an array of those, so JSON needs it.
+  - It resolves to the `Response`, or `null` when nothing was inserted: a failed request (already reported by `request`) or an abort, including one during the body read.
+  - Other content types, an unreadable body, invalid JSON and a bad or throwing render reject without inserting.
+  - Everything is normalised to one node (`toNode`: strings through a `<template>`) before one insert table. `at` is `inner | outer | before | prepend | append | after`, mapped to `replaceChildren`, `replaceWith`, `before`, `prepend`, `append` and `after`, or a function `(target, node)`. `outer`, `before` and `after` silently do nothing on a detached element, so they go through the `attached` check. A `<template>` parses without the target's context, so an SVG target needs `render` to return nodes.
+  - Concurrent loads are deliberately not coordinated; callers abort the previous one via `signal`.
 
 ### How the two modules interact
 
